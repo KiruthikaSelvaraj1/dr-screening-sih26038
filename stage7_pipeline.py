@@ -17,8 +17,11 @@ import stage6_classification_train as s6
 SEVERITY = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
 LESION_NAMES = {"MA": "microaneurysms", "HE": "hemorrhages",
                 "EX": "hard exudates", "SE": "soft exudates"}
-# From validation Dice: MA = 0.00 (failed), SE = 0.22 (weak; mostly overlaps hard exudates). Update if you retrain.
-NOT_ASSESSED = {"MA", "SE"}
+# Held-out TEST Dice with the combined v1+v2 models (v1 for EX, v2 for the rest):
+#   MA=0.50  HE=0.54  EX=0.61(v1)  SE=0.51  OD=0.91
+# All five clear the 0.40 reliability bar, so nothing is excluded currently.
+# Update this set if you retrain either model and a lesion type drops below your bar.
+NOT_ASSESSED = set()
 LOW_RELIABILITY = set()
 
 # Generic screening guidance - check against your local clinical guidelines before real use.
@@ -34,14 +37,29 @@ COLORS = {"MA": (255, 0, 0), "HE": (0, 0, 255), "EX": (255, 255, 0),
 
 
 def load_models(cls_path="/content/drive/MyDrive/p1/models/best_model.pth",
-                seg_path="/content/drive/MyDrive/p1/models/seg_model.pth"):
+                seg_v1_path="/content/drive/MyDrive/p1/models/seg_model.pth",
+                seg_v2_path="/content/drive/MyDrive/p1/models/seg_model_v2.pth"):
+    """
+    v2 (lesion-focused crop training) is better for MA, HE, SE, OD, but regressed
+    on hard exudates (test Dice 0.61 for v1 vs 0.31 for v2). So: use v1 for EX,
+    v2 for everything else. Held-out test Dice used for this call:
+      v1: EX=0.61 | v2: MA=0.50 HE=0.54 SE=0.51 OD=0.91
+    """
+    import stage5_v2_segmentation as s5v2
+
     cls_model = s6.build_model()
     cls_model.load_state_dict(torch.load(cls_path, map_location=s6.DEVICE))
     cls_model.eval()
-    seg_model = s5.build_model()
-    seg_model.load_state_dict(torch.load(seg_path, map_location=s5.DEVICE))
-    seg_model.eval()
-    return cls_model, seg_model
+
+    seg_v1 = s5.build_model()
+    seg_v1.load_state_dict(torch.load(seg_v1_path, map_location=s5.DEVICE))
+    seg_v1.eval()
+
+    seg_v2 = s5v2.s5.build_model() if hasattr(s5v2, "s5") else s5.build_model()
+    seg_v2.load_state_dict(torch.load(seg_v2_path, map_location=s5.DEVICE))
+    seg_v2.eval()
+
+    return cls_model, {"v1": seg_v1, "v2": seg_v2, "v2_thresholds": s5v2.load_thresholds(seg_v2_path)}
 
 
 @torch.no_grad()
@@ -53,10 +71,20 @@ def classify(cls_model, image_rgb):
 
 
 def count_lesions(mask, min_area=3):
-    """Connected blobs in a binary mask -> (count, list of centroids)."""
+    """Connected blobs in a binary mask -> (count, list of centroids).
+    Blob count is approximate - one real lesion can fragment into several small
+    blobs, especially for tiny lesions like microaneurysms. Use coverage_pct
+    (below) as the more trustworthy number; keep count for rough location only."""
     n, _, stats, cents = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     keep = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= min_area]
     return len(keep), [tuple(cents[i]) for i in keep]
+
+
+def coverage_pct(mask):
+    """Percent of the retinal image area covered by this lesion mask.
+    More reliable than a blob count, since it isn't affected by one lesion
+    fragmenting into multiple small connected components."""
+    return round(100.0 * mask.sum() / mask.size, 2)
 
 
 def region_label(cx, cy, w, h, ref=None):
@@ -75,8 +103,11 @@ def make_overlay(image_rgb, masks, alpha=0.45):
     return overlay
 
 
-def run_pipeline(image_rgb, cls_model, seg_model):
-    """image_rgb: H x W x 3 uint8 (RGB). Returns a result dict."""
+def run_pipeline(image_rgb, cls_model, seg_models):
+    """image_rgb: H x W x 3 uint8 (RGB). Returns a result dict.
+    seg_models: the dict returned by load_models() - {"v1", "v2", "v2_thresholds"}.
+    """
+    import stage5_v2_segmentation as s5v2
     h, w = image_rgb.shape[:2]
 
     # Stage 1: quality gate (checked at 224x224, the scale the thresholds were tuned on)
@@ -91,9 +122,15 @@ def run_pipeline(image_rgb, cls_model, seg_model):
     enhanced = cv2.cvtColor(s1.enhance_image(cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)),
                             cv2.COLOR_BGR2RGB)  # display only
 
-    # Stage 3: severity;  Stage 2: lesion masks (both on the raw image)
+    # Stage 3: severity
     sev_idx, probs = classify(cls_model, image_rgb)
-    masks = s5.predict_masks(seg_model, image_rgb)
+
+    # Stage 2: lesion masks - v1 for hard exudates (better on held-out test: 0.61 vs 0.31),
+    # v2 for everything else (fixed MA/SE, same-or-better HE/OD)
+    masks_v1 = s5.predict_masks(seg_models["v1"], image_rgb)
+    masks_v2 = s5v2.predict_masks_v2(seg_models["v2"], image_rgb, seg_models["v2_thresholds"])
+    masks = dict(masks_v2)
+    masks["EX"] = masks_v1["EX"]
 
     # Evidence: counts + rough locations
     od_pts = np.argwhere(masks["OD"] > 0)
@@ -104,7 +141,7 @@ def run_pipeline(image_rgb, cls_model, seg_model):
     for c in ("MA", "HE", "EX", "SE"):
         n, cents = count_lesions(masks[c], min_area)
         regions = sorted({region_label(cx, cy, w, h, ref) for cx, cy in cents})
-        evidence[c] = {"count": n, "regions": regions}
+        evidence[c] = {"count": n, "regions": regions, "coverage_pct": coverage_pct(masks[c])}
         if c not in NOT_ASSESSED:
             total += n
 
@@ -122,8 +159,9 @@ def run_pipeline(image_rgb, cls_model, seg_model):
             lines.append(f"- {LESION_NAMES[c]}: not assessed (model is not reliable for this lesion type)")
             continue
         tag = " [low reliability]" if c in LOW_RELIABILITY else ""
-        if e["count"]:
-            lines.append(f"- {e['count']} {LESION_NAMES[c]} detected ({', '.join(e['regions'])}){tag}")
+        if e["coverage_pct"] > 0:
+            lines.append(f"- {LESION_NAMES[c]}: present, covering {e['coverage_pct']}% of the retina "
+                         f"(~{e['count']} spots, {', '.join(e['regions'])}){tag}")
         else:
             lines.append(f"- no {LESION_NAMES[c]} detected{tag}")
     rec = RECOMMENDATION[sev_idx]

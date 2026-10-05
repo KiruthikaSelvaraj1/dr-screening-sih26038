@@ -1,0 +1,30 @@
+name: Build Docker image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t dr-screening-api .
+
+      - name: Smoke test - container starts and /health responds
+        run: |
+          docker run -d -p 8000:8000 --name dr-api dr-screening-api
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8000/health; then
+              echo "API is up"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "API did not become healthy in time"
+          docker logs dr-api
+          exit 1

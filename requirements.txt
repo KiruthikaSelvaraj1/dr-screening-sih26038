@@ -9,3 +9,6 @@ pandas
 pillow
 scikit-learn
 streamlit>=1.40
+fastapi
+uvicorn[standard]
+python-multipart

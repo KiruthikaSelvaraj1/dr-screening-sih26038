@@ -63,7 +63,7 @@ The official PS (MathWorks, MedTech/BioTech/HealthTech theme) asks for more than
 | Fovea, vessels, neovascularization | ❌ Not built — IDRiD's 81 pixel-annotated images limit how many lesion types can be reliably trained from scratch; scoped as future work |
 | DR severity grading, sensitivity >90% / specificity >85% | ✅ **Met** (91.3% / 93.3%) |
 | Explainability — lesion-level evidence + confidence | ✅ Done, via lesion coverage reporting instead of a heatmap (see [Results](#results)) |
-| Grad-CAM specifically | ❌ Not built — lesion-evidence reporting was chosen as a stronger alternative (see below), but the PS names Grad-CAM explicitly |
+| Grad-CAM specifically | ✅ Done — shown alongside the lesion-evidence report, not replacing it (see below) |
 | Calibrated confidence | ❌ Raw softmax only; the PS asks for calibrated confidence specifically |
 | Doctor review workflow, <30 sec target | ⚠️ Report format supports fast review; no confirm/override UI, no timing measured |
 | Simulink district-level workflow simulation | ❌ Not built — out of scope for a solo portfolio project |
@@ -181,7 +181,7 @@ docker build -t dr-screening-api .
 docker run -p 8000:8000 dr-screening-api
 ```
 
-Needs all four files in `models/` first (see the structure above) — see [`docs/setup.md`](docs/setup.md) for how to get or retrain them. Model checkpoints aren't committed directly (the segmentation models are ~90–100MB each); they're distributed via [Git LFS / a linked download — fill in whichever you choose].
+Needs all four files in `models/` first (see the structure above) — see [`docs/setup.md`](docs/setup.md) for how to get or retrain them. Model checkpoints aren't committed as plain files (the segmentation models are ~90–100MB each, close to GitHub's single-file limit) — they're tracked with **Git LFS** instead.
 
 ---
 

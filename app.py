@@ -70,11 +70,13 @@ if file is not None:
     else:
         if patient_ref:
             st.caption(f"Reference: {patient_ref}")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.image(img, caption="Original", use_container_width=True)
         c2.image(res["overlay"], use_container_width=True,
-                 caption="Evidence overlay: yellow = hard exudates, blue = hemorrhages, "
+                 caption="Lesion evidence: yellow = hard exudates, blue = hemorrhages, "
                          "green = optic disc")
+        c3.image(res["gradcam_overlay"], use_container_width=True,
+                 caption="Grad-CAM: where the classifier focused")
 
         m1, m2 = st.columns(2)
         m1.metric("Predicted severity", res["severity"])

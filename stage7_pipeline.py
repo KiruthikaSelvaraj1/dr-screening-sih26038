@@ -13,6 +13,7 @@ import torch
 import stage1_quality_assessment as s1
 import stage5_segmentation_train as s5
 import stage6_classification_train as s6
+import gradcam
 
 SEVERITY = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
 LESION_NAMES = {"MA": "microaneurysms", "HE": "hemorrhages",
@@ -122,8 +123,12 @@ def run_pipeline(image_rgb, cls_model, seg_models):
     enhanced = cv2.cvtColor(s1.enhance_image(cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)),
                             cv2.COLOR_BGR2RGB)  # display only
 
-    # Stage 3: severity
+    # Stage 3: severity + Grad-CAM (PS asks for Grad-CAM explicitly; lesion evidence
+    # below remains the primary explanation - see README for why)
     sev_idx, probs = classify(cls_model, image_rgb)
+    _, val_tf = s6.get_transforms()
+    gradcam_overlay, _, _ = gradcam.compute_gradcam_overlay(
+        cls_model, image_rgb, val_tf, s6.DEVICE, class_idx=sev_idx)
 
     # Stage 2: lesion masks - v1 for hard exudates (better on held-out test: 0.61 vs 0.31),
     # v2 for everything else (fixed MA/SE, same-or-better HE/OD)
@@ -176,4 +181,5 @@ def run_pipeline(image_rgb, cls_model, seg_models):
             "confidence": float(probs[sev_idx]), "probs": probs.tolist(),
             "recommendation": rec,
             "evidence": evidence, "overlay": make_overlay(image_rgb, masks),
+            "gradcam_overlay": gradcam_overlay,
             "enhanced": enhanced, "report": "\n".join(lines)}
